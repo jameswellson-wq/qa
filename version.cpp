@@ -5,9 +5,12 @@
 //
 
 #include <windows.h>
+#include "shim_verlanguagename.h"   // VerLanguageNameA/W 运行时 SHIM（替代 KERNEL32 静态转发）
+
 HMODULE g_hCurrentModule = NULL;
 
 
+// ── 静态 PE 转发条目（15 个函数直连 VERSION_SRC） ───────────────────────────
 #pragma comment(linker, "/EXPORT:GetFileVersionInfoA=VERSION_SRC.GetFileVersionInfoA,@1")
 #pragma comment(linker, "/EXPORT:GetFileVersionInfoByHandle=VERSION_SRC.GetFileVersionInfoByHandle,@2")
 #pragma comment(linker, "/EXPORT:GetFileVersionInfoExA=VERSION_SRC.GetFileVersionInfoExA,@3")
@@ -21,8 +24,11 @@ HMODULE g_hCurrentModule = NULL;
 #pragma comment(linker, "/EXPORT:VerFindFileW=VERSION_SRC.VerFindFileW,@11")
 #pragma comment(linker, "/EXPORT:VerInstallFileA=VERSION_SRC.VerInstallFileA,@12")
 #pragma comment(linker, "/EXPORT:VerInstallFileW=VERSION_SRC.VerInstallFileW,@13")
-#pragma comment(linker, "/EXPORT:VerLanguageNameA=KERNEL32.VerLanguageNameA,@14")
-#pragma comment(linker, "/EXPORT:VerLanguageNameW=KERNEL32.VerLanguageNameW,@15")
+// @14  VerLanguageNameA — 已移入 shim_verlanguagename.cpp（运行时 4 级探测）
+// @15  VerLanguageNameW — 同上
+//      原来的写法："/EXPORT:VerLanguageNameA=KERNEL32.VerLanguageNameA,@14"
+//      问题：KERNEL32 存根是 XP 兼容遗留，未来版本 / Wine 可能缺失，
+//             DLL 加载时报"找不到过程入口"导致进程崩溃。
 #pragma comment(linker, "/EXPORT:VerQueryValueA=VERSION_SRC.VerQueryValueA,@16")
 #pragma comment(linker, "/EXPORT:VerQueryValueW=VERSION_SRC.VerQueryValueW,@17")
 
@@ -34,9 +40,9 @@ BOOL NsLoad()
 
 
 BOOL APIENTRY DllMain( HMODULE hModule,
-                      DWORD  ul_reason_for_call,
-                      LPVOID lpReserved
-                      )
+                       DWORD   ul_reason_for_call,
+                       LPVOID  lpReserved
+                       )
 {
     switch (ul_reason_for_call)
     {
@@ -44,7 +50,14 @@ BOOL APIENTRY DllMain( HMODULE hModule,
         {
             g_hCurrentModule = hModule;
             DisableThreadLibraryCalls(hModule);
-            if ( !NsLoad() )
+
+            // 提前初始化 VerLanguageNameA/W SHIM
+            // · 在此时机探测 KERNEL32 / KERNELBASE（肯定已加载）
+            // · VERSION_SRC.dll 若已加载也会被优先使用
+            // · INIT_ONCE 保证线程安全，重复调用无副作用
+            ShimVerLanguageName_Init();
+
+            if (!NsLoad())
                 return FALSE;
             break;
         }
@@ -55,4 +68,3 @@ BOOL APIENTRY DllMain( HMODULE hModule,
     }
     return TRUE;
 }
-
