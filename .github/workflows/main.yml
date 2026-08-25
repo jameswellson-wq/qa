@@ -1,4 +1,3 @@
-
 name: Build version.dll
 
 on:
@@ -6,8 +5,12 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
-  # 手动触发
   workflow_dispatch:
+
+# 全局环境变量：解决 Node 20 弃用警告
+env:
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: false   # 明确使用 Node 24，不回退
+  LOG_DIR: build-logs                               # 统一日志目录
 
 jobs:
   # ============================================================
@@ -21,38 +24,121 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
+      # ── 初始化日志目录 ──────────────────────────────────────
+      - name: 初始化日志目录
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:LOG_DIR" | Out-Null
+          $header = @"
+          ================================================================
+          Build version.dll  |  Debug x64
+          Workflow : $env:GITHUB_WORKFLOW
+          Run ID   : $env:GITHUB_RUN_ID
+          Commit   : $env:GITHUB_SHA
+          Runner   : $env:RUNNER_NAME  ($env:RUNNER_OS)
+          Time     : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC' -AsUTC)
+          ================================================================
+          "@
+          $header | Out-File -FilePath "$env:LOG_DIR\build-debug-x64.log" -Encoding utf8
+
+      # ── 配置 MSBuild（输出写入日志）──────────────────────────
       - name: 配置 MSBuild 环境
+        id: setup_msbuild
         uses: microsoft/setup-msbuild@v2
         with:
           msbuild-architecture: x64
 
+      - name: 记录 MSBuild 环境信息
+        run: |
+          @"
+          ----------------------------------------------------------------
+          [STEP] 配置 MSBuild 环境
+          MSBuild Path : ${{ steps.setup_msbuild.outputs.msbuildPath }}
+          VS Install   : $(& 'C:\ProgramData\Chocolatey\bin\vswhere.exe' -products * -requires Microsoft.Component.MSBuild -property installationPath -latest 2>&1)
+          Node Version : $(node --version 2>&1)
+          Time         : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC' -AsUTC)
+          ----------------------------------------------------------------
+          "@ | Out-File -FilePath "$env:LOG_DIR\build-debug-x64.log" -Encoding utf8 -Append
+
+      # ── 编译（stdout + stderr 同时写日志）────────────────────
       - name: 编译 Debug x64
         run: |
+          @"
+          ----------------------------------------------------------------
+          [STEP] 编译 Debug x64
+          Command: msbuild version.sln /p:Configuration=Debug /p:Platform=x64
+          Time   : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC' -AsUTC)
+          ----------------------------------------------------------------
+          "@ | Out-File -FilePath "$env:LOG_DIR\build-debug-x64.log" -Encoding utf8 -Append
+
+          # 编译，stdout+stderr 同时写日志并保留控制台输出
           msbuild version.sln `
             /p:Configuration=Debug `
             /p:Platform=x64 `
             /p:VisualStudioVersion=17.0 `
             /m `
             /nologo `
-            /verbosity:minimal
+            /verbosity:detailed `
+            /flp:logfile=${{ env.LOG_DIR }}\msbuild-debug-x64.log`;verbosity=diagnostic 2>&1 |
+            Tee-Object -FilePath "$env:LOG_DIR\build-debug-x64.log" -Append
 
-      - name: 验证产物存在
+          # 把 MSBuild 原生日志也追加进统一日志
+          if (Test-Path "$env:LOG_DIR\msbuild-debug-x64.log") {
+            "`n[MSBuild Diagnostic Log]`n" |
+              Out-File "$env:LOG_DIR\build-debug-x64.log" -Encoding utf8 -Append
+            Get-Content "$env:LOG_DIR\msbuild-debug-x64.log" |
+              Out-File "$env:LOG_DIR\build-debug-x64.log" -Encoding utf8 -Append
+          }
+
+      # ── 验证产物 ─────────────────────────────────────────────
+      - name: 验证产物
         run: |
+          @"
+          ----------------------------------------------------------------
+          [STEP] 验证产物
+          Time : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC' -AsUTC)
+          ----------------------------------------------------------------
+          "@ | Out-File -FilePath "$env:LOG_DIR\build-debug-x64.log" -Encoding utf8 -Append
+
           if (!(Test-Path "x64\Debug\version.dll")) {
+            "❌ 编译失败：version.dll 未生成" |
+              Out-File "$env:LOG_DIR\build-debug-x64.log" -Encoding utf8 -Append
             Write-Error "编译失败：version.dll 未生成"
             exit 1
           }
-          Write-Host "产物路径: x64\Debug\version.dll"
-          Write-Host "文件大小: $((Get-Item 'x64\Debug\version.dll').Length) bytes"
 
-      - name: 上传 Debug 产物
+          $dll  = Get-Item "x64\Debug\version.dll"
+          $pdb  = if (Test-Path "x64\Debug\version.pdb") { Get-Item "x64\Debug\version.pdb" } else { $null }
+          $info = @"
+          ✅ 产物验证通过
+             version.dll : $($dll.FullName)  [$($dll.Length) bytes]
+             version.pdb : $(if ($pdb) { "$($pdb.FullName)  [$($pdb.Length) bytes]" } else { "未生成" })
+          "@
+          $info | Tee-Object -FilePath "$env:LOG_DIR\build-debug-x64.log" -Append
+
+      # ── 写入尾部摘要 ─────────────────────────────────────────
+      - name: 写入日志尾部
+        if: always()
+        run: |
+          @"
+
+          ================================================================
+          构建完成
+          结果 : ${{ job.status }}
+          时间 : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC' -AsUTC)
+          ================================================================
+          "@ | Out-File -FilePath "$env:LOG_DIR\build-debug-x64.log" -Encoding utf8 -Append
+
+      # ── 上传：DLL + 统一日志 ─────────────────────────────────
+      - name: 上传 Debug 产物 + 日志
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: version-dll-debug-x64
           path: |
             x64/Debug/version.dll
             x64/Debug/version.pdb
-          retention-days: 7            # Debug 产物保留 7 天
+            build-logs/build-debug-x64.log
+          retention-days: 7
 
   # ============================================================
   # Job 2: Release x64
@@ -65,49 +151,207 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
+      - name: 初始化日志目录
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:LOG_DIR" | Out-Null
+          $header = @"
+          ================================================================
+          Build version.dll  |  Release x64
+          Workflow : $env:GITHUB_WORKFLOW
+          Run ID   : $env:GITHUB_RUN_ID
+          Commit   : $env:GITHUB_SHA
+          Runner   : $env:RUNNER_NAME  ($env:RUNNER_OS)
+          Time     : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC' -AsUTC)
+          ================================================================
+          "@
+          $header | Out-File -FilePath "$env:LOG_DIR\build-release-x64.log" -Encoding utf8
+
       - name: 配置 MSBuild 环境
+        id: setup_msbuild
         uses: microsoft/setup-msbuild@v2
         with:
           msbuild-architecture: x64
 
+      - name: 记录 MSBuild 环境信息
+        run: |
+          @"
+          ----------------------------------------------------------------
+          [STEP] 配置 MSBuild 环境
+          MSBuild Path : ${{ steps.setup_msbuild.outputs.msbuildPath }}
+          VS Install   : $(& 'C:\ProgramData\Chocolatey\bin\vswhere.exe' -products * -requires Microsoft.Component.MSBuild -property installationPath -latest 2>&1)
+          Node Version : $(node --version 2>&1)
+          Time         : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC' -AsUTC)
+          ----------------------------------------------------------------
+          "@ | Out-File -FilePath "$env:LOG_DIR\build-release-x64.log" -Encoding utf8 -Append
+
       - name: 编译 Release x64
         run: |
+          @"
+          ----------------------------------------------------------------
+          [STEP] 编译 Release x64
+          Command: msbuild version.sln /p:Configuration=Release /p:Platform=x64
+          Time   : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC' -AsUTC)
+          ----------------------------------------------------------------
+          "@ | Out-File -FilePath "$env:LOG_DIR\build-release-x64.log" -Encoding utf8 -Append
+
           msbuild version.sln `
             /p:Configuration=Release `
             /p:Platform=x64 `
             /p:VisualStudioVersion=17.0 `
             /m `
             /nologo `
-            /verbosity:minimal
+            /verbosity:detailed `
+            /flp:logfile=${{ env.LOG_DIR }}\msbuild-release-x64.log`;verbosity=diagnostic 2>&1 |
+            Tee-Object -FilePath "$env:LOG_DIR\build-release-x64.log" -Append
 
-      - name: 验证产物存在
+          if (Test-Path "$env:LOG_DIR\msbuild-release-x64.log") {
+            "`n[MSBuild Diagnostic Log]`n" |
+              Out-File "$env:LOG_DIR\build-release-x64.log" -Encoding utf8 -Append
+            Get-Content "$env:LOG_DIR\msbuild-release-x64.log" |
+              Out-File "$env:LOG_DIR\build-release-x64.log" -Encoding utf8 -Append
+          }
+
+      - name: 验证产物
         run: |
+          @"
+          ----------------------------------------------------------------
+          [STEP] 验证产物
+          Time : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC' -AsUTC)
+          ----------------------------------------------------------------
+          "@ | Out-File -FilePath "$env:LOG_DIR\build-release-x64.log" -Encoding utf8 -Append
+
           if (!(Test-Path "x64\Release\version.dll")) {
+            "❌ 编译失败：version.dll 未生成" |
+              Out-File "$env:LOG_DIR\build-release-x64.log" -Encoding utf8 -Append
             Write-Error "编译失败：version.dll 未生成"
             exit 1
           }
-          Write-Host "产物路径: x64\Release\version.dll"
-          Write-Host "文件大小: $((Get-Item 'x64\Release\version.dll').Length) bytes"
 
-      # Release 的 vcxproj 里 GenerateDebugInformation=true
-      # 所以这里连 PDB 一起上传（修掉 vcxproj 后可去掉 pdb 那行）
-      - name: 上传 Release 产物
+          $dll  = Get-Item "x64\Release\version.dll"
+          $pdb  = if (Test-Path "x64\Release\version.pdb") { Get-Item "x64\Release\version.pdb" } else { $null }
+          $info = @"
+          ✅ 产物验证通过
+             version.dll : $($dll.FullName)  [$($dll.Length) bytes]
+             version.pdb : $(if ($pdb) { "$($pdb.FullName)  [$($pdb.Length) bytes]" } else { "未生成" })
+          "@
+          $info | Tee-Object -FilePath "$env:LOG_DIR\build-release-x64.log" -Append
+
+      - name: 写入日志尾部
+        if: always()
+        run: |
+          @"
+
+          ================================================================
+          构建完成
+          结果 : ${{ job.status }}
+          时间 : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC' -AsUTC)
+          ================================================================
+          "@ | Out-File -FilePath "$env:LOG_DIR\build-release-x64.log" -Encoding utf8 -Append
+
+      - name: 上传 Release 产物 + 日志
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: version-dll-release-x64
           path: |
             x64/Release/version.dll
             x64/Release/version.pdb
-          retention-days: 30           # Release 产物保留 30 天
+            build-logs/build-release-x64.log
+          retention-days: 30
 
   # ============================================================
-  # Job 3: 打 Tag 时自动发布 GitHub Release
+  # Job 3: 合并两份日志为一个统一日志文件
+  # ============================================================
+  merge-logs:
+    name: Merge Build Logs
+    needs: [ build-debug, build-release ]
+    runs-on: windows-latest
+    if: always()                          # 即使编译失败也要收集日志
+
+    steps:
+      - name: 下载 Debug 日志
+        uses: actions/download-artifact@v4
+        with:
+          name: version-dll-debug-x64
+          path: artifacts/debug
+
+      - name: 下载 Release 日志
+        uses: actions/download-artifact@v4
+        with:
+          name: version-dll-release-x64
+          path: artifacts/release
+
+      - name: 合并为统一日志
+        run: |
+          New-Item -ItemType Directory -Force -Path "merged-logs" | Out-Null
+
+          $mergedLog = "merged-logs\build-all-$env:GITHUB_RUN_ID.log"
+
+          # 总览头部
+          @"
+          ████████████████████████████████████████████████████████████████
+          version.dll 完整构建日志
+          Workflow   : $env:GITHUB_WORKFLOW
+          Run ID     : $env:GITHUB_RUN_ID
+          Run Number : $env:GITHUB_RUN_NUMBER
+          Commit     : $env:GITHUB_SHA
+          Branch     : $env:GITHUB_REF_NAME
+          Triggered  : $env:GITHUB_EVENT_NAME
+          Merged At  : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC' -AsUTC)
+          ████████████████████████████████████████████████████████████████
+
+          "@ | Out-File -FilePath $mergedLog -Encoding utf8
+
+          # 合并 Debug 日志
+          "####### DEBUG x64 LOG #######" |
+            Out-File $mergedLog -Encoding utf8 -Append
+          $debugLog = Get-ChildItem "artifacts/debug" -Filter "*.log" -Recurse | Select-Object -First 1
+          if ($debugLog) {
+            Get-Content $debugLog.FullName | Out-File $mergedLog -Encoding utf8 -Append
+          } else {
+            "（Debug 日志未找到）" | Out-File $mergedLog -Encoding utf8 -Append
+          }
+
+          "`n`n" | Out-File $mergedLog -Encoding utf8 -Append
+
+          # 合并 Release 日志
+          "####### RELEASE x64 LOG #######" |
+            Out-File $mergedLog -Encoding utf8 -Append
+          $releaseLog = Get-ChildItem "artifacts/release" -Filter "*.log" -Recurse | Select-Object -First 1
+          if ($releaseLog) {
+            Get-Content $releaseLog.FullName | Out-File $mergedLog -Encoding utf8 -Append
+          } else {
+            "（Release 日志未找到）" | Out-File $mergedLog -Encoding utf8 -Append
+          }
+
+          # 尾部摘要
+          @"
+
+          ████████████████████████████████████████████████████████████████
+          日志合并完成
+          Debug   Job : ${{ needs.build-debug.result }}
+          Release Job : ${{ needs.build-release.result }}
+          ████████████████████████████████████████████████████████████████
+          "@ | Out-File $mergedLog -Encoding utf8 -Append
+
+          Write-Host "统一日志已生成: $mergedLog"
+          Write-Host "文件大小: $((Get-Item $mergedLog).Length) bytes"
+
+      - name: 上传统一日志
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-all-${{ github.run_id }}
+          path: merged-logs/
+          retention-days: 90            # 统一日志保留 90 天
+
+  # ============================================================
+  # Job 4: 打 Tag 时自动发布 GitHub Release
   # ============================================================
   release:
     name: Publish GitHub Release
-    needs: [ build-debug, build-release ]   # 两个编译都成功才执行
+    needs: [ build-debug, build-release, merge-logs ]
     runs-on: windows-latest
-    if: startsWith(github.ref, 'refs/tags/v')  # 仅 tag 触发
+    if: startsWith(github.ref, 'refs/tags/v')
 
     steps:
       - name: 下载 Release 产物
@@ -122,6 +366,12 @@ jobs:
           name: version-dll-debug-x64
           path: artifacts/debug
 
+      - name: 下载统一日志
+        uses: actions/download-artifact@v4
+        with:
+          name: build-logs-all-${{ github.run_id }}
+          path: artifacts/logs
+
       - name: 打包
         run: |
           Compress-Archive `
@@ -130,6 +380,9 @@ jobs:
           Compress-Archive `
             -Path artifacts/debug/version.dll, artifacts/debug/version.pdb `
             -DestinationPath version-debug-x64.zip
+          Compress-Archive `
+            -Path artifacts/logs/* `
+            -DestinationPath build-logs.zip
 
       - name: 发布 GitHub Release
         uses: softprops/action-gh-release@v2
@@ -140,8 +393,15 @@ jobs:
             - 平台：x64
             - 工具链：MSVC v143 (VS 2022)
             - Commit：${{ github.sha }}
+            ## 文件说明
+            | 文件 | 说明 |
+            |---|---|
+            | `version-release-x64.zip` | Release 版本 DLL |
+            | `version-debug-x64.zip` | Debug 版本 DLL + PDB |
+            | `build-logs.zip` | 完整构建日志 |
           files: |
             version-release-x64.zip
             version-debug-x64.zip
+            build-logs.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
