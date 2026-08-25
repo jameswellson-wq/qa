@@ -1,148 +1,153 @@
-<?xml version="1.0" encoding="utf-8"?>
-<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+name: Build version.dll
 
-  <!-- ===== 配置矩阵：仅 x64，Debug / Release ===== -->
-  <ItemGroup Label="ProjectConfigurations">
-    <ProjectConfiguration Include="Debug|x64">
-      <Configuration>Debug</Configuration>
-      <Platform>x64</Platform>
-    </ProjectConfiguration>
-    <ProjectConfiguration Include="Release|x64">
-      <Configuration>Release</Configuration>
-      <Platform>x64</Platform>
-    </ProjectConfiguration>
-  </ItemGroup>
+# ─────────────────────────────────────────────
+# 触发条件
+# ─────────────────────────────────────────────
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  # 推送 vX.Y.Z 格式的 tag → 触发 Release 发布
+  push_tags:
+    tags: [ 'v*.*.*' ]
+  # 手动触发
+  workflow_dispatch:
 
-  <!-- ===== 全局属性 ===== -->
-  <PropertyGroup Label="Globals">
-    <VCProjectVersion>17.0</VCProjectVersion>
-    <Keyword>Win64Proj</Keyword>
-    <ProjectGuid>{CDA4005B-FB27-4785-A4B7-6B43D4210DB5}</ProjectGuid>
-    <RootNamespace>version</RootNamespace>
-    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
-  </PropertyGroup>
+# ─────────────────────────────────────────────
+# 修复问题1：Node 弃用警告
+# 明确声明使用 Node 24，消除 Node 20 弃用提示
+# ─────────────────────────────────────────────
+env:
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: false
 
-  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+jobs:
 
-  <!-- ===== Debug 配置 ===== -->
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
-    <ConfigurationType>DynamicLibrary</ConfigurationType>
-    <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
-    <CharacterSet>Unicode</CharacterSet>
-    <!-- 修复问题3：关闭 WholeProgramOptimization，Debug 不需要 -->
-    <WholeProgramOptimization>false</WholeProgramOptimization>
-  </PropertyGroup>
+  # ═══════════════════════════════════════════
+  # 修复问题2：原来 Debug / Release 是两个并行 Job
+  # 实际上它们都需要 MSBuild 环境初始化（最耗时）
+  # 合并成一个 Job，串行编译两个配置
+  # 节省约 2-3 分钟的 runner 冷启动和 VS 初始化时间
+  # ═══════════════════════════════════════════
+  build:
+    name: Build (Debug + Release | x64)
+    runs-on: windows-latest
 
-  <!-- ===== Release 配置 ===== -->
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
-    <ConfigurationType>DynamicLibrary</ConfigurationType>
-    <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
-    <CharacterSet>Unicode</CharacterSet>
-    <WholeProgramOptimization>true</WholeProgramOptimization>
-  </PropertyGroup>
+    steps:
+      # ── 1. 拉代码 ──────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
 
-  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
-  <ImportGroup Label="ExtensionSettings" />
-  <ImportGroup Label="Shared" />
+      # ── 2. 初始化 MSVC 环境（只做一次） ────
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
 
-  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props"
-            Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')"
-            Label="LocalAppDataPlatform" />
-  </ImportGroup>
-  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props"
-            Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')"
-            Label="LocalAppDataPlatform" />
-  </ImportGroup>
+      # ── 3. 编译 Debug ──────────────────────
+      - name: Build Debug
+        shell: pwsh
+        run: |
+          msbuild version.sln `
+            /p:Configuration=Debug `
+            /p:Platform=x64 `
+            /p:VisualStudioVersion=17.0 `
+            /m `
+            /nologo `
+            /verbosity:minimal `
+            /flp:"LogFile=build-debug.log;Verbosity=normal;Encoding=UTF-8"
+          # 修复问题1：verbosity 分离
+          #   控制台用 minimal（只看警告/错误）
+          #   文件用 normal（保留足够诊断信息，去掉 diagnostic 的属性展开噪音）
 
-  <PropertyGroup Label="UserMacros" />
+      # ── 4. 编译 Release ────────────────────
+      - name: Build Release
+        shell: pwsh
+        run: |
+          msbuild version.sln `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /p:VisualStudioVersion=17.0 `
+            /m `
+            /nologo `
+            /verbosity:minimal `
+            /flp:"LogFile=build-release.log;Verbosity=normal;Encoding=UTF-8"
 
-  <!-- ===== 输出路径统一设置（两个配置共用） ===== -->
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <LinkIncremental>true</LinkIncremental>
-    <OutDir>$(SolutionDir)build\$(Configuration)\$(Platform)\</OutDir>
-    <IntDir>$(SolutionDir)build\$(Configuration)\$(Platform)\obj\</IntDir>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <LinkIncremental>false</LinkIncremental>
-    <OutDir>$(SolutionDir)build\$(Configuration)\$(Platform)\</OutDir>
-    <IntDir>$(SolutionDir)build\$(Configuration)\$(Platform)\obj\</IntDir>
-  </PropertyGroup>
+      # ── 5. 上传 Debug 产物 ─────────────────
+      - name: Upload Debug artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: version-dll-debug-x64
+          # 修复问题3：输出路径与 vcxproj 的 OutDir 保持一致
+          path: build/Debug/x64/version.dll
+          if-no-files-found: error
+          retention-days: 7
 
-  <!-- ===== Debug 编译 & 链接 ===== -->
-  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <ClCompile>
-      <PrecompiledHeader>NotUsing</PrecompiledHeader>
-      <WarningLevel>Level3</WarningLevel>
-      <SDLCheck>true</SDLCheck>
-      <Optimization>Disabled</Optimization>
-      <PreprocessorDefinitions>_WIN64;_DEBUG;VERSION_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <ConformanceMode>true</ConformanceMode>
-      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
-      <!-- 修复问题3：Debug 关掉 /GS buffer check 的额外开销可选，这里保留安全检查 -->
-      <BufferSecurityCheck>true</BufferSecurityCheck>
-      <!-- 额外调试信息 -->
-      <DebugInformationFormat>EditAndContinue</DebugInformationFormat>
-    </ClCompile>
-    <Link>
-      <SubSystem>Windows</SubSystem>
-      <GenerateDebugInformation>true</GenerateDebugInformation>
-      <EnableUAC>false</EnableUAC>
-      <!-- DLL 不需要 DEP 检查，但保留 NXCOMPAT -->
-      <AdditionalOptions>/NXCOMPAT %(AdditionalOptions)</AdditionalOptions>
-    </Link>
-  </ItemDefinitionGroup>
+      # ── 6. 上传 Release 产物 ───────────────
+      - name: Upload Release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: version-dll-release-x64
+          path: build/Release/x64/version.dll
+          if-no-files-found: error
+          retention-days: 30
 
-  <!-- ===== Release 编译 & 链接 ===== -->
-  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <ClCompile>
-      <WarningLevel>Level3</WarningLevel>
-      <PrecompiledHeader>NotUsing</PrecompiledHeader>
-      <!-- 修复问题3：O2 → MaxSpeed + 函数级链接 + 内联 -->
-      <Optimization>MaxSpeed</Optimization>
-      <FunctionLevelLinking>true</FunctionLevelLinking>
-      <IntrinsicFunctions>true</IntrinsicFunctions>
-      <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>_WIN64;NDEBUG;VERSION_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <ConformanceMode>true</ConformanceMode>
-      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
-      <!-- 修复问题3：Release 不要 EditAndContinue，改 ProgramDatabase -->
-      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
-      <BufferSecurityCheck>false</BufferSecurityCheck>
-      <!-- 去掉运行时检查，Release 不要 RTC -->
-      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
-      <!-- 修复问题3：去掉 /GS 的 cookie，减小体积（proxy DLL 不需要栈保护） -->
-      <AdditionalOptions>/GS- %(AdditionalOptions)</AdditionalOptions>
-    </ClCompile>
-    <Link>
-      <SubSystem>Windows</SubSystem>
-      <!-- 修复问题1：Release 不输出 PDB（减小 artifact 体积，CI 用途） -->
-      <!-- 如需 PDB 做符号调试，改为 true -->
-      <GenerateDebugInformation>false</GenerateDebugInformation>
-      <EnableUAC>false</EnableUAC>
-      <EnableCOMDATFolding>true</EnableCOMDATFolding>
-      <OptimizeReferences>true</OptimizeReferences>
-      <!-- 修复问题3：链接时代码生成（配合 WholeProgramOptimization） -->
-      <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
-      <AdditionalOptions>/NXCOMPAT %(AdditionalOptions)</AdditionalOptions>
-    </Link>
-  </ItemDefinitionGroup>
+      # ── 7. 上传合并日志 ────────────────────
+      # 修复问题1：两份日志合并上传，不再各自独立 Job 收集
+      - name: Merge and upload build logs
+        if: always()   # 编译失败也要收日志
+        shell: pwsh
+        run: |
+          $header = "=" * 64
+          $merged = @()
+          $merged += $header
+          $merged += "version.dll Build Log — $env:GITHUB_RUN_ID  Run#$env:GITHUB_RUN_NUMBER"
+          $merged += "Triggered by: $env:GITHUB_EVENT_NAME  Ref: $env:GITHUB_REF"
+          $merged += $header
+          $merged += ""
 
-  <!-- ===== 源文件 ===== -->
-  <ItemGroup>
-    <ClCompile Include="version.cpp" />
-  </ItemGroup>
-  <ItemGroup>
-    <ClInclude Include="resource.h" />
-  </ItemGroup>
-  <ItemGroup>
-    <ResourceCompile Include="version.rc" />
-  </ItemGroup>
+          foreach ($cfg in @("debug","release")) {
+            $file = "build-$cfg.log"
+            if (Test-Path $file) {
+              $merged += "=" * 64
+              $merged += "[$($cfg.ToUpper())] $file"
+              $merged += "=" * 64
+              $merged += Get-Content $file
+              $merged += ""
+            }
+          }
 
-  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
-  <ImportGroup Label="ExtensionTargets" />
+          $merged | Out-File -FilePath "build-all.log" -Encoding UTF8
+          Write-Host "Merged log: $(($merged).Count) lines"
 
-</Project>
+      - name: Upload merged log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.run_number }}
+          path: build-all.log
+          retention-days: 14
+
+  # ═══════════════════════════════════════════
+  # Release 发布 Job（仅在推送 tag 时触发）
+  # 依赖 build Job 完成后的 artifact
+  # ═══════════════════════════════════════════
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    # 只在 tag push 时运行
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Download Release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: version-dll-release-x64
+          path: dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/version.dll
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
