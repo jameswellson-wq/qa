@@ -6,11 +6,10 @@ name: Build version.dll
 on:
   push:
     branches: [ main, master ]
+    # 推送 vX.Y.Z 格式的 tag → 触发 Release 发布
+    tags: [ 'v*.*.*' ]
   pull_request:
     branches: [ main, master ]
-  # 推送 vX.Y.Z 格式的 tag → 触发 Release 发布
-  push_tags:
-    tags: [ 'v*.*.*' ]
   # 手动触发
   workflow_dispatch:
 
