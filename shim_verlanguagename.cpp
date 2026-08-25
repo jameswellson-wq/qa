@@ -55,20 +55,37 @@ typedef DWORD (WINAPI *pfnVerLanguageNameW_t)(DWORD wLang, LPWSTR szLang, DWORD 
 static pfnVerLanguageNameA_t s_pfnA = nullptr;
 static pfnVerLanguageNameW_t s_pfnW = nullptr;
 
+// 我们通过 LoadLibraryExW 主动加载的模块句柄（引用计数需要配对 FreeLibrary）。
+// nullptr 表示初始化阶段仅使用了 GetModuleHandle（不增加引用计数），无需释放。
+// 仅在 ShimVerLanguageName_Cleanup() 中释放，通过 InterlockedExchangePointer
+// 保证多次调用的线程安全与幂等性。
+static HMODULE s_hOwnedModule = nullptr;
+
 // INIT_ONCE 控制：全进程只做一次探测
 static INIT_ONCE s_InitOnce = INIT_ONCE_STATIC_INIT;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 内部工具：安全加载系统 DLL
-//   · 先 GetModuleHandle（零开销：已加载就不重复 Load）
+//   · 先 GetModuleHandle（零开销：已加载就不重复 Load，不增加引用计数）
 //   · 再 LoadLibraryEx + LOAD_LIBRARY_SEARCH_SYSTEM32
 //     （只搜系统目录，防止 DLL 劫持攻击我们自己）
+//
+// pbOwned [out]：
+//   true  → 函数内部调用了 LoadLibraryExW 并成功；
+//            调用方持有该 HMODULE 的额外引用，必须负责配对 FreeLibrary。
+//   false → 函数使用了 GetModuleHandle 或 LoadLibraryExW 失败（hMod = NULL）；
+//            调用方无需也不应调用 FreeLibrary。
 // ─────────────────────────────────────────────────────────────────────────────
-static HMODULE SafeLoadSystem(const wchar_t* dllName)
+static HMODULE SafeLoadSystem(const wchar_t* dllName, bool* pbOwned)
 {
+    *pbOwned = false;
     HMODULE hMod = GetModuleHandleW(dllName);
     if (!hMod)
+    {
         hMod = LoadLibraryExW(dllName, NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (hMod)
+            *pbOwned = true;   // 我们增加了引用计数，需要配对 FreeLibrary
+    }
     return hMod;
 }
 
@@ -106,9 +123,18 @@ static BOOL WINAPI ShimInitCallback(
 
     for (const auto& p : kProbes)
     {
-        HMODULE hMod = p.mustAlreadyBeLoaded
-            ? GetModuleHandleW(p.name)
-            : SafeLoadSystem(p.name);
+        HMODULE hMod  = nullptr;
+        bool    bOwned = false;    // 本次循环是否通过 LoadLibraryExW 加载
+
+        if (p.mustAlreadyBeLoaded)
+        {
+            hMod = GetModuleHandleW(p.name);
+            // GetModuleHandle 不改变引用计数，bOwned 保持 false
+        }
+        else
+        {
+            hMod = SafeLoadSystem(p.name, &bOwned);
+        }
 
         if (!hMod)
             continue;
@@ -123,8 +149,18 @@ static BOOL WINAPI ShimInitCallback(
             // 两个都找到才算成功，避免出现 A 有 W 无的半残状态
             s_pfnA = pfnA;
             s_pfnW = pfnW;
+            // 若本次是通过 LoadLibraryExW 加载的，保存句柄供 Cleanup 释放。
+            // 函数指针指向的代码段属于该模块；在 DLL_PROCESS_DETACH 之前
+            // 不能释放，否则指针悬空。
+            if (bOwned)
+                s_hOwnedModule = hMod;
             return TRUE;
         }
+
+        // 本次探测找到了模块但两个函数不全，继续下一条探测。
+        // 若是我们主动加载的，必须立即释放；否则此模块句柄永远泄漏。
+        if (bOwned)
+            FreeLibrary(hMod);
     }
 
     // 4. 完全找不到 → s_pfnA / s_pfnW 保持 nullptr → 安全降级路径
@@ -134,12 +170,35 @@ static BOOL WINAPI ShimInitCallback(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 公开 API：主动初始化（version.cpp DllMain 中调用）
+// 公开 API：主动初始化（version.cpp DllMain DLL_PROCESS_ATTACH 中调用）
 // ─────────────────────────────────────────────────────────────────────────────
 void ShimVerLanguageName_Init(void)
 {
     PVOID pCtx = nullptr;
     InitOnceExecuteOnce(&s_InitOnce, ShimInitCallback, nullptr, &pCtx);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 公开 API：清理（version.cpp DllMain DLL_PROCESS_DETACH 中调用）
+//
+// 若 ShimInitCallback 通过 LoadLibraryExW 加载了某个系统 DLL，
+// 此处调用 FreeLibrary 释放那次额外的引用计数，保持 Load/Free 配对。
+//
+// 调用时机约束：
+//   · 必须在 DLL_PROCESS_DETACH 时调用，此时函数指针 s_pfnA/s_pfnW 已
+//     不可能被其他线程调用（进程正在退出，或模块已被显式卸载）。
+//   · 不要在进程仍然运行且 VerLanguageName* 可能被调用时提前释放，
+//     否则悬空函数指针将导致访问违规。
+//
+// 线程安全：InterlockedExchangePointer 保证幂等，多次调用无副作用。
+// ─────────────────────────────────────────────────────────────────────────────
+void ShimVerLanguageName_Cleanup(void)
+{
+    // 原子地取出并清零 s_hOwnedModule，确保多次调用只 Free 一次
+    HMODULE h = static_cast<HMODULE>(
+        InterlockedExchangePointer(reinterpret_cast<PVOID*>(&s_hOwnedModule), nullptr));
+    if (h)
+        FreeLibrary(h);
 }
 
 // 内部懒初始化宏：在导出函数入口处保证 INIT_ONCE 已执行
