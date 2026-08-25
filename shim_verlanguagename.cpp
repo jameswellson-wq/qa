@@ -8,8 +8,27 @@
 //   新增: 本文件中的运行时探测 + 序号 pragma
 //
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 修复 C2375 "redefinition; different linkage"
+// ─────────────────────────────────────────────────────────────────────────────
+// <windows.h> 在没有 WIN32_LEAN_AND_MEAN 时会自动拉入 <winver.h>，
+// 而 <winver.h> 把 VerLanguageNameA/W 声明为 __declspec(dllimport)。
+// 随后本文件用 __declspec(dllexport) 定义同名函数，
+// 编译器检测到两种 linkage 不一致 → C2375。
+//
+// 解决：在任何 #include <windows.h> 之前定义 WIN32_LEAN_AND_MEAN，
+// 令 <windows.h> 跳过 <winver.h>（以及 DDE、CommDlg 等非必需头文件），
+// 从而避免 VerLanguageName* 的 dllimport 声明出现在本编译单元中。
+//
+// 本文件只用 LoadLibraryEx / GetModuleHandle / GetProcAddress /
+// InitOnceExecuteOnce / SetLastError，全部在 WIN32_LEAN_AND_MEAN 下可用。
+// ─────────────────────────────────────────────────────────────────────────────
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
 #include "shim_verlanguagename.h"
-#include <windows.h>
+// <windows.h> 已由 shim_verlanguagename.h 引入，无需在此重复包含
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 序号导出：维持与真实 version.dll 完全一致的 ordinal（@14 / @15）
