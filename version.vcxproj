@@ -91,6 +91,8 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
+      <!-- 导出表由 version.def 统一管理（@1~@17），消除 /EXPORT pragma 双写问题 -->
+      <ModuleDefinitionFile>version.def</ModuleDefinitionFile>
       <!-- /NXCOMPAT 已由 MSVC 默认 /DYNAMICBASE 携带，无需重复指定 -->
     </Link>
   </ItemDefinitionGroup>
@@ -127,6 +129,8 @@
       <!-- 链接时代码生成（配合 WholeProgramOptimization） -->
       <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
       <!-- /NXCOMPAT 已由 MSVC 默认 /DYNAMICBASE 携带，无需重复指定 -->
+      <!-- 导出表由 version.def 统一管理（@1~@17），消除 /EXPORT pragma 双写问题 -->
+      <ModuleDefinitionFile>version.def</ModuleDefinitionFile>
     </Link>
   </ItemDefinitionGroup>
 
@@ -139,6 +143,10 @@
   <ItemGroup>
     <ClInclude Include="resource.h" />
     <ClInclude Include="shim_verlanguagename.h" />
+  </ItemGroup>
+  <!-- version.def：DLL 导出表定义，链接器通过 ModuleDefinitionFile 引用 -->
+  <ItemGroup>
+    <None Include="version.def" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="version.rc" />
