@@ -1,3 +1,16 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// WIN32_LEAN_AND_MEAN — 必须是翻译单元的第一条有效语句
+// ─────────────────────────────────────────────────────────────────────────────
+// 即使 shim_verlanguagename.h 已条件定义此宏，在 .cpp 中重复保证不会有副作用。
+// 防御性写法：无论 include 顺序如何，都能保证 <windows.h> 以 lean 模式编译。
+//
+// 根因说明：
+//   若缺少此宏，#include <windows.h> → #include <winver.h>（自动拉入）
+//   winver.h 声明 WINBASEAPI DWORD WINAPI VerLanguageNameA(...) （dllimport）
+//   本文件下方再定义同名函数（无 dllimport）→ C2375 redefinition; different linkage
+//
+#define WIN32_LEAN_AND_MEAN
+
 //
 // shim_verlanguagename.cpp
 // VerLanguageNameA / W 运行时兼容 SHIM — 实现
@@ -5,37 +18,32 @@
 // 替换 version.cpp 中已删除的两条静态 KERNEL32 转发：
 //   删除: #pragma comment(linker, "/EXPORT:VerLanguageNameA=KERNEL32.VerLanguageNameA,@14")
 //   删除: #pragma comment(linker, "/EXPORT:VerLanguageNameW=KERNEL32.VerLanguageNameW,@15")
-//   新增: 本文件中的运行时探测 + 序号 pragma
+//
+// 导出机制重新设计：
+//   ✗ 旧方案: /EXPORT pragma + __declspec(dllexport) 双写 → 潜在 LNK4197
+//   ✓ 新方案: 由 version.def 统一声明 VerLanguageNameA @14 / VerLanguageNameW @15
+//             本文件仅提供函数实现，不再涉及导出属性
 //
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 修复 C2375 "redefinition; different linkage"
-// ─────────────────────────────────────────────────────────────────────────────
-// <windows.h> 在没有 WIN32_LEAN_AND_MEAN 时会自动拉入 <winver.h>，
-// 而 <winver.h> 把 VerLanguageNameA/W 声明为 __declspec(dllimport)。
-// 随后本文件用 __declspec(dllexport) 定义同名函数，
-// 编译器检测到两种 linkage 不一致 → C2375。
-//
-// 解决：在任何 #include <windows.h> 之前定义 WIN32_LEAN_AND_MEAN，
-// 令 <windows.h> 跳过 <winver.h>（以及 DDE、CommDlg 等非必需头文件），
-// 从而避免 VerLanguageName* 的 dllimport 声明出现在本编译单元中。
-//
-// 本文件只用 LoadLibraryEx / GetModuleHandle / GetProcAddress /
-// InitOnceExecuteOnce / SetLastError，全部在 WIN32_LEAN_AND_MEAN 下可用。
-// ─────────────────────────────────────────────────────────────────────────────
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-
+#include <windows.h>
 #include "shim_verlanguagename.h"
-// <windows.h> 已由 shim_verlanguagename.h 引入，无需在此重复包含
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 序号导出：维持与真实 version.dll 完全一致的 ordinal（@14 / @15）
+// 序号导出：已迁移至 version.def
 // ─────────────────────────────────────────────────────────────────────────────
-// 注意：这里不用 NONAME，保持按名称 + 按序号双重导出，与原始 DLL 导出表一致。
-#pragma comment(linker, "/EXPORT:VerLanguageNameA,@14")
-#pragma comment(linker, "/EXPORT:VerLanguageNameW,@15")
+// 原来的两条 pragma：
+//   #pragma comment(linker, "/EXPORT:VerLanguageNameA,@14")   ← 已删除
+//   #pragma comment(linker, "/EXPORT:VerLanguageNameW,@15")   ← 已删除
+//
+// version.def 中对应条目：
+//   VerLanguageNameA  @14
+//   VerLanguageNameW  @15
+//
+// 删除原因：
+//   pragma + __declspec(dllexport) 同时存在是双重导出。
+//   链接器若检测到同一符号被两种机制导出且 ordinal 一致，
+//   会产生 LNK4197 警告。改用 .def 是 DLL proxy 项目的标准做法，
+//   ordinal 管理集中在一处，易于维护和审查。
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 函数指针类型
@@ -144,8 +152,12 @@ void ShimVerLanguageName_Init(void)
 // ─────────────────────────────────────────────────────────────────────────────
 // 导出函数实现
 // ─────────────────────────────────────────────────────────────────────────────
+// 注意：此处不再使用 __declspec(dllexport)。
+//       导出由 version.def 控制（VerLanguageNameA @14 / VerLanguageNameW @15）。
+//       extern "C" 保留：确保链接器符号名为 C 风格（无 C++ 名称修饰），
+//       与 .def 文件中的导出名称 "VerLanguageNameA" / "VerLanguageNameW" 精确匹配。
 
-extern "C" __declspec(dllexport)
+extern "C"
 DWORD WINAPI VerLanguageNameA(DWORD wLang, LPSTR szLang, DWORD nSize)
 {
     // 懒初始化：若 DllMain 中未提前调用 ShimVerLanguageName_Init()，
@@ -166,7 +178,7 @@ DWORD WINAPI VerLanguageNameA(DWORD wLang, LPSTR szLang, DWORD nSize)
     return 0;
 }
 
-extern "C" __declspec(dllexport)
+extern "C"
 DWORD WINAPI VerLanguageNameW(DWORD wLang, LPWSTR szLang, DWORD nSize)
 {
     SHIM_ENSURE_INIT();
