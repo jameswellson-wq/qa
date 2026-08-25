@@ -1,0 +1,147 @@
+
+name: Build version.dll
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  # 手动触发
+  workflow_dispatch:
+
+jobs:
+  # ============================================================
+  # Job 1: Debug x64
+  # ============================================================
+  build-debug:
+    name: Debug | x64
+    runs-on: windows-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置 MSBuild 环境
+        uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
+
+      - name: 编译 Debug x64
+        run: |
+          msbuild version.sln `
+            /p:Configuration=Debug `
+            /p:Platform=x64 `
+            /p:VisualStudioVersion=17.0 `
+            /m `
+            /nologo `
+            /verbosity:minimal
+
+      - name: 验证产物存在
+        run: |
+          if (!(Test-Path "x64\Debug\version.dll")) {
+            Write-Error "编译失败：version.dll 未生成"
+            exit 1
+          }
+          Write-Host "产物路径: x64\Debug\version.dll"
+          Write-Host "文件大小: $((Get-Item 'x64\Debug\version.dll').Length) bytes"
+
+      - name: 上传 Debug 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: version-dll-debug-x64
+          path: |
+            x64/Debug/version.dll
+            x64/Debug/version.pdb
+          retention-days: 7            # Debug 产物保留 7 天
+
+  # ============================================================
+  # Job 2: Release x64
+  # ============================================================
+  build-release:
+    name: Release | x64
+    runs-on: windows-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置 MSBuild 环境
+        uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-architecture: x64
+
+      - name: 编译 Release x64
+        run: |
+          msbuild version.sln `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /p:VisualStudioVersion=17.0 `
+            /m `
+            /nologo `
+            /verbosity:minimal
+
+      - name: 验证产物存在
+        run: |
+          if (!(Test-Path "x64\Release\version.dll")) {
+            Write-Error "编译失败：version.dll 未生成"
+            exit 1
+          }
+          Write-Host "产物路径: x64\Release\version.dll"
+          Write-Host "文件大小: $((Get-Item 'x64\Release\version.dll').Length) bytes"
+
+      # Release 的 vcxproj 里 GenerateDebugInformation=true
+      # 所以这里连 PDB 一起上传（修掉 vcxproj 后可去掉 pdb 那行）
+      - name: 上传 Release 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: version-dll-release-x64
+          path: |
+            x64/Release/version.dll
+            x64/Release/version.pdb
+          retention-days: 30           # Release 产物保留 30 天
+
+  # ============================================================
+  # Job 3: 打 Tag 时自动发布 GitHub Release
+  # ============================================================
+  release:
+    name: Publish GitHub Release
+    needs: [ build-debug, build-release ]   # 两个编译都成功才执行
+    runs-on: windows-latest
+    if: startsWith(github.ref, 'refs/tags/v')  # 仅 tag 触发
+
+    steps:
+      - name: 下载 Release 产物
+        uses: actions/download-artifact@v4
+        with:
+          name: version-dll-release-x64
+          path: artifacts/release
+
+      - name: 下载 Debug 产物
+        uses: actions/download-artifact@v4
+        with:
+          name: version-dll-debug-x64
+          path: artifacts/debug
+
+      - name: 打包
+        run: |
+          Compress-Archive `
+            -Path artifacts/release/version.dll `
+            -DestinationPath version-release-x64.zip
+          Compress-Archive `
+            -Path artifacts/debug/version.dll, artifacts/debug/version.pdb `
+            -DestinationPath version-debug-x64.zip
+
+      - name: 发布 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "version.dll ${{ github.ref_name }}"
+          body: |
+            ## 构建信息
+            - 平台：x64
+            - 工具链：MSVC v143 (VS 2022)
+            - Commit：${{ github.sha }}
+          files: |
+            version-release-x64.zip
+            version-debug-x64.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
