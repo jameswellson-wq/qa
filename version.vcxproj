@@ -131,11 +131,14 @@
   </ItemDefinitionGroup>
 
   <!-- ===== 源文件 ===== -->
+  <!-- ===== 源文件 (version.cpp + SHIM 实现) ===== -->
   <ItemGroup>
     <ClCompile Include="version.cpp" />
+    <ClCompile Include="shim_verlanguagename.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="resource.h" />
+    <ClInclude Include="shim_verlanguagename.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="version.rc" />
