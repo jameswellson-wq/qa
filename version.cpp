@@ -43,14 +43,26 @@ BOOL APIENTRY DllMain( HMODULE hModule,
             g_hCurrentModule = hModule;
             DisableThreadLibraryCalls(hModule);
 
-            // 提前初始化 VerLanguageNameA/W SHIM
-            // · 在此时机探测 KERNEL32 / KERNELBASE（肯定已加载）
-            // · VERSION_SRC.dll 若已加载也会被优先使用
-            // · INIT_ONCE 保证线程安全，重复调用无副作用
+            // SHIM 初始化保持同步：仅 GetModuleHandle + GetProcAddress，
+            // 在 Loader Lock 下完全合法（KERNEL32/KERNELBASE 此时必然已加载）。
             ShimVerLanguageName_Init();
 
-            if (!NsLoad())
-                return FALSE;
+            // [FIX LOADER LOCK]
+            // NsLoad() 可能执行 LoadLibrary / 网络请求 / 复杂线程同步。
+            // DllMain 持有 Loader Lock 期间同步调用这些操作会死锁或崩溃。
+            // 修复：CreateThread 把 NsLoad() 派发到 Loader Lock 之外执行。
+            // MSDN 明确允许在 DllMain 里调用 CreateThread。
+            // DllMain 立即返回 TRUE，不阻塞加载器；
+            // NsLoad() 失败时在其内部实现重试 / 错误日志。
+            {
+                HANDLE hThread = CreateThread(
+                    NULL, 0,
+                    [](LPVOID) -> DWORD { NsLoad(); return 0; },
+                    NULL, 0, NULL
+                );
+                if (hThread)
+                    CloseHandle(hThread); // detached：线程自行退出
+            }
             break;
         }
     case DLL_THREAD_ATTACH:
