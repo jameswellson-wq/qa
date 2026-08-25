@@ -1,46 +1,22 @@
 ; =============================================================================
 ; version.def
-; version.dll 导出表 — 唯一真实来源（@1 ~ @17）
+; 本文件只管理"本 DLL 自身实现"的导出函数序号。
 ;
-; 格式说明：
-;   ExportName = DLL.Symbol @N   → PE Forwarder（本 DLL 不实现，运行时由 OS 转发）
-;   ExportName              @N   → 本 DLL 实现（shim_verlanguagename.cpp 提供）
+; PE Forwarder（转发到 VERSION_SRC.dll 的 15 个函数）不在此处声明，
+; 原因：MSVC 链接器不支持 .def 文件里的 Forwarder 语法（= DLL.Symbol），
+;       链接器会把右侧当本地符号名解析 → LNK2001。
+;       Forwarder 必须通过 /EXPORT:Name=DLL.Symbol,@N 链接器选项实现，
+;       在 version.cpp 中以 #pragma comment(linker, ...) 注入。
 ;
-; 维护规则：
-;   · 所有 ordinal 改动只在此文件进行，不得在 .cpp 里再写 /EXPORT pragma
-;   · Forwarder 目标 DLL 名必须与部署时重命名后的 version.dll 文件名一致
-;     （当前约定：VERSION_SRC.dll）
+; 本文件职责：为 SHIM 函数指定 ordinal（不能在 .cpp 里用 /EXPORT pragma 同时
+;             给 dllexport 函数指定 ordinal，否则 LNK4197 双重导出警告）。
 ; =============================================================================
 
 LIBRARY version
 
 EXPORTS
-    ; ── Forwarder 条目（@1~@13，@16~@17）──────────────────────────────────
-    ; 本 DLL 不实现，PE Forwarder RVA 直接指向 VERSION_SRC 中的同名导出。
-    ; 调用方无感知，性能等同于直接调用真实 version.dll。
-
-    GetFileVersionInfoA         = VERSION_SRC.GetFileVersionInfoA           @1
-    GetFileVersionInfoByHandle  = VERSION_SRC.GetFileVersionInfoByHandle    @2
-    GetFileVersionInfoExA       = VERSION_SRC.GetFileVersionInfoExA         @3
-    GetFileVersionInfoExW       = VERSION_SRC.GetFileVersionInfoExW         @4
-    GetFileVersionInfoSizeA     = VERSION_SRC.GetFileVersionInfoSizeA       @5
-    GetFileVersionInfoSizeExA   = VERSION_SRC.GetFileVersionInfoSizeExA     @6
-    GetFileVersionInfoSizeExW   = VERSION_SRC.GetFileVersionInfoSizeExW     @7
-    GetFileVersionInfoSizeW     = VERSION_SRC.GetFileVersionInfoSizeW       @8
-    GetFileVersionInfoW         = VERSION_SRC.GetFileVersionInfoW           @9
-    VerFindFileA                = VERSION_SRC.VerFindFileA                  @10
-    VerFindFileW                = VERSION_SRC.VerFindFileW                  @11
-    VerInstallFileA             = VERSION_SRC.VerInstallFileA               @12
-    VerInstallFileW             = VERSION_SRC.VerInstallFileW               @13
-
-    ; ── SHIM 条目（@14~@15）────────────────────────────────────────────────
-    ; 由 shim_verlanguagename.cpp 提供运行时 4 级探测实现。
-    ; 替代原来的 KERNEL32 静态转发，解决 Wine / 精简镜像 / 未来版本兼容问题。
-
-    VerLanguageNameA                                                         @14
-    VerLanguageNameW                                                         @15
-
-    ; ── Forwarder 条目（续）───────────────────────────────────────────────
-
-    VerQueryValueA              = VERSION_SRC.VerQueryValueA                @16
-    VerQueryValueW              = VERSION_SRC.VerQueryValueW                @17
+    ; ── SHIM 函数（本 DLL 实现，shim_verlanguagename.cpp 提供）──────────────
+    ; 替代原来的 KERNEL32 静态转发，运行时 4 级探测。
+    ; 序号 @14/@15 与真实 version.dll 导出表保持一致。
+    VerLanguageNameA    @14
+    VerLanguageNameW    @15
