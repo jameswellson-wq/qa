@@ -80,7 +80,12 @@ BOOL APIENTRY DllMain( HMODULE hModule,
         }
     case DLL_THREAD_ATTACH:
     case DLL_THREAD_DETACH:
+        break;
     case DLL_PROCESS_DETACH:
+        // 释放 SHIM 通过 LoadLibraryExW 加载的模块（引用计数配对）。
+        // lpReserved != NULL 时进程正在终止，系统会强制回收所有句柄，
+        // 此处依然调用以保持代码显式、可审计的 Load/Free 对称性。
+        ShimVerLanguageName_Cleanup();
         break;
     }
     return TRUE;
