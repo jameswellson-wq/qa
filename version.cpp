@@ -14,13 +14,26 @@
 #include <windows.h>
 #include "shim_verlanguagename.h"   // VerLanguageNameA/W 运行时 SHIM
 
-// ── 导出表已全部移入 version.def ──────────────────────────────────────────
-// 原来在此处的 15 条 /EXPORT pragma（@1~@13, @16~@17）统一由 version.def 管理。
-// 链接器通过 /DEF:version.def 读取所有导出定义，包含 Forwarder 条目和 SHIM 序号。
-// 好处：
-//   · 单一真实来源，ordinal 修改只在 .def 进行
-//   · 彻底消除与 __declspec(dllexport) 混用时的 LNK4197 双重导出警告
-//   · .def 文件格式更易审查和 diff
+// ── PE Forwarder 条目（@1~@13, @16~@17）→ VERSION_SRC.dll ────────────────
+// MSVC 链接器不支持 .def 文件的 Forwarder 语法（Symbol = DLL.Symbol @N），
+// 会把右侧当本地符号名解析 → LNK2001。
+// 必须用 /EXPORT:Symbol=DLL.Symbol,@N 链接器选项，此处以 #pragma 注入。
+// @14/@15（VerLanguageNameA/W）由 shim_verlanguagename.cpp 实现，序号在 version.def 声明。
+#pragma comment(linker, "/EXPORT:GetFileVersionInfoA=VERSION_SRC.GetFileVersionInfoA,@1")
+#pragma comment(linker, "/EXPORT:GetFileVersionInfoByHandle=VERSION_SRC.GetFileVersionInfoByHandle,@2")
+#pragma comment(linker, "/EXPORT:GetFileVersionInfoExA=VERSION_SRC.GetFileVersionInfoExA,@3")
+#pragma comment(linker, "/EXPORT:GetFileVersionInfoExW=VERSION_SRC.GetFileVersionInfoExW,@4")
+#pragma comment(linker, "/EXPORT:GetFileVersionInfoSizeA=VERSION_SRC.GetFileVersionInfoSizeA,@5")
+#pragma comment(linker, "/EXPORT:GetFileVersionInfoSizeExA=VERSION_SRC.GetFileVersionInfoSizeExA,@6")
+#pragma comment(linker, "/EXPORT:GetFileVersionInfoSizeExW=VERSION_SRC.GetFileVersionInfoSizeExW,@7")
+#pragma comment(linker, "/EXPORT:GetFileVersionInfoSizeW=VERSION_SRC.GetFileVersionInfoSizeW,@8")
+#pragma comment(linker, "/EXPORT:GetFileVersionInfoW=VERSION_SRC.GetFileVersionInfoW,@9")
+#pragma comment(linker, "/EXPORT:VerFindFileA=VERSION_SRC.VerFindFileA,@10")
+#pragma comment(linker, "/EXPORT:VerFindFileW=VERSION_SRC.VerFindFileW,@11")
+#pragma comment(linker, "/EXPORT:VerInstallFileA=VERSION_SRC.VerInstallFileA,@12")
+#pragma comment(linker, "/EXPORT:VerInstallFileW=VERSION_SRC.VerInstallFileW,@13")
+#pragma comment(linker, "/EXPORT:VerQueryValueA=VERSION_SRC.VerQueryValueA,@16")
+#pragma comment(linker, "/EXPORT:VerQueryValueW=VERSION_SRC.VerQueryValueW,@17")
 
 HMODULE g_hCurrentModule = NULL;
 
