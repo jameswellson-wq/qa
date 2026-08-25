@@ -13,8 +13,22 @@ env:
 
 jobs:
   build:
-    name: Build (Debug + Release | x64)
+    # 矩阵：同时构建 x64 与 x86 两个平台
+    # arch          — 对外展示名称（artifact 名称、日志标签等）
+    # msbuild_platform — MSBuild /p:Platform= 的值
+    #   x64 → MSBuild "x64"
+    #   x86 → MSBuild "Win32"（MSVC 传统命名，与 .sln/.vcxproj 保持一致）
+    name: Build (${{ matrix.arch }} | Debug + Release)
     runs-on: windows-latest
+
+    strategy:
+      fail-fast: false    # 一个平台失败不中止另一个平台的构建
+      matrix:
+        include:
+          - arch: x64
+            msbuild_platform: x64
+          - arch: x86
+            msbuild_platform: Win32
 
     steps:
       # 1. 拉取代码
@@ -26,11 +40,12 @@ jobs:
         uses: microsoft/setup-msbuild@v2
 
       # 3. 打印构建环境信息
-      - name: Print build environment
+      - name: Print build environment (${{ matrix.arch }})
         shell: pwsh
         run: |
           Write-Host "===== Runner Environment ====="
           Write-Host "OS       : $env:RUNNER_OS / $env:ImageOS $env:ImageVersion"
+          Write-Host "Arch     : ${{ matrix.arch }} (MSBuild Platform=${{ matrix.msbuild_platform }})"
           Write-Host "Workspace: $env:GITHUB_WORKSPACE"
           Write-Host ""
           Write-Host "===== MSBuild Version ====="
@@ -56,12 +71,12 @@ jobs:
           }
 
       # 4. 编译 Debug 版本
-      - name: Build Debug
+      - name: Build Debug (${{ matrix.arch }})
         shell: pwsh
         run: |
           msbuild version.sln `
             /p:Configuration=Debug `
-            /p:Platform=x64 `
+            /p:Platform=${{ matrix.msbuild_platform }} `
             /p:VisualStudioVersion=17.0 `
             /m `
             /nologo `
@@ -69,12 +84,12 @@ jobs:
             /flp:"LogFile=build-debug.log;Verbosity=detailed;Encoding=UTF-8"
 
       # 5. 编译 Release 版本
-      - name: Build Release
+      - name: Build Release (${{ matrix.arch }})
         shell: pwsh
         run: |
           msbuild version.sln `
             /p:Configuration=Release `
-            /p:Platform=x64 `
+            /p:Platform=${{ matrix.msbuild_platform }} `
             /p:VisualStudioVersion=17.0 `
             /m `
             /nologo `
@@ -82,7 +97,7 @@ jobs:
             /flp:"LogFile=build-release.log;Verbosity=detailed;Encoding=UTF-8"
 
       # 6. DLL 导出表验证 (dumpbin)
-      - name: Verify DLL exports
+      - name: Verify DLL exports (${{ matrix.arch }})
         if: always()
         shell: pwsh
         run: |
@@ -94,54 +109,54 @@ jobs:
             exit 0
           }
           foreach ($cfg in @("Debug","Release")) {
-            $dll = "build\$cfg\x64\version.dll"
+            $dll = "build\$cfg\${{ matrix.msbuild_platform }}\version.dll"
             if (-not (Test-Path $dll)) {
-              Write-Host "[$cfg] version.dll not found, skipping"
+              Write-Host "[$cfg/${{ matrix.arch }}] version.dll not found, skipping"
               continue
             }
             Write-Host ""
-            Write-Host "===== [$cfg] version.dll — File Info ====="
+            Write-Host "===== [$cfg/${{ matrix.arch }}] version.dll — File Info ====="
             $fi = Get-Item $dll
             Write-Host ("  Size: {0:N0} bytes  Modified: {1}" -f $fi.Length, $fi.LastWriteTimeUtc.ToString("u"))
             Write-Host ""
-            Write-Host "===== [$cfg] EXPORTS (dumpbin /EXPORTS) ====="
+            Write-Host "===== [$cfg/${{ matrix.arch }}] EXPORTS (dumpbin /EXPORTS) ====="
             & $dumpbin /EXPORTS $dll 2>&1 | ForEach-Object { Write-Host "  $_" }
             Write-Host ""
-            Write-Host "===== [$cfg] HEADERS summary (dumpbin /HEADERS) ====="
+            Write-Host "===== [$cfg/${{ matrix.arch }}] HEADERS summary (dumpbin /HEADERS) ====="
             & $dumpbin /HEADERS $dll 2>&1 |
               Where-Object { $_ -match 'machine|subsystem|characteristics|size of image|DLL' } |
               ForEach-Object { Write-Host "  $_" }
           }
 
       # 7. 上传 Debug 构件
-      - name: Upload Debug artifact
+      - name: Upload Debug artifact (${{ matrix.arch }})
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: version-dll-debug-x64
-          path: build/Debug/x64/version.dll
+          name: version-dll-debug-${{ matrix.arch }}
+          path: build/Debug/${{ matrix.msbuild_platform }}/version.dll
           if-no-files-found: warn
           retention-days: 7
 
       # 8. 上传 Release 构件
-      - name: Upload Release artifact
+      - name: Upload Release artifact (${{ matrix.arch }})
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: version-dll-release-x64
-          path: build/Release/x64/version.dll
+          name: version-dll-release-${{ matrix.arch }}
+          path: build/Release/${{ matrix.msbuild_platform }}/version.dll
           if-no-files-found: warn
           retention-days: 30
 
       # 9. 合并并上传完整日志
-      - name: Merge and upload build logs
+      - name: Merge and upload build logs (${{ matrix.arch }})
         if: always()
         shell: pwsh
         run: |
           $header = "=" * 64
           $merged = @()
           $merged += $header
-          $merged += "version.dll Build Log — $env:GITHUB_RUN_ID  Run#$env:GITHUB_RUN_NUMBER"
+          $merged += "version.dll Build Log — $env:GITHUB_RUN_ID  Run#$env:GITHUB_RUN_NUMBER  [${{ matrix.arch }}]"
           $merged += "Triggered by: $env:GITHUB_EVENT_NAME  Ref: $env:GITHUB_REF"
           $merged += "Commit: $env:GITHUB_SHA"
           $merged += $header
@@ -150,7 +165,7 @@ jobs:
             $file = "build-$cfg.log"
             if (Test-Path $file) {
               $merged += "=" * 64
-              $merged += "[$($cfg.ToUpper())] $file"
+              $merged += "[$($cfg.ToUpper())/${{ matrix.arch }}] $file"
               $merged += "=" * 64
               $merged += Get-Content $file
               $merged += ""
@@ -159,11 +174,11 @@ jobs:
           $merged | Out-File -FilePath "build-all.log" -Encoding UTF8
           Write-Host "Merged log: $(($merged).Count) lines"
 
-      - name: Upload merged log
+      - name: Upload merged log (${{ matrix.arch }})
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log-${{ github.run_number }}
+          name: build-log-${{ github.run_number }}-${{ matrix.arch }}
           path: build-all.log
           retention-days: 14
 
@@ -174,16 +189,25 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
 
     steps:
-      - name: Download Release artifact
+      # 两个平台的 Release DLL 都打包进 Release
+      - name: Download Release artifact (x64)
         uses: actions/download-artifact@v4
         with:
           name: version-dll-release-x64
-          path: dist/
+          path: dist/x64/
+
+      - name: Download Release artifact (x86)
+        uses: actions/download-artifact@v4
+        with:
+          name: version-dll-release-x86
+          path: dist/x86/
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/version.dll
+          files: |
+            dist/x64/version.dll
+            dist/x86/version.dll
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
