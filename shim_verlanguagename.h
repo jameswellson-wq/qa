@@ -28,7 +28,7 @@
 //
 //   而 shim_verlanguagename.cpp 中的函数定义没有 dllimport 属性，
 //   两者在同一翻译单元内共存 → C2375 redefinition; different linkage
-//                                 / C4273 inconsistent dll linkage
+//                               / C4273 inconsistent dll linkage
 //
 //   修复：本头文件在包含 <windows.h> 前强制定义 WIN32_LEAN_AND_MEAN，
 //   阻断对 <winver.h> 的拉入，从根本上消除冲突。
@@ -86,6 +86,12 @@ extern "C" {
 //   内部由 INIT_ONCE 保护，多次调用无副作用。
 // ---------------------------------------------------------------------------
 void ShimVerLanguageName_Init(void);
+
+// ---------------------------------------------------------------------------
+// ShimVerLanguageName_Cleanup
+//   释放 SHIM 初始化期间加载的资源。在 DllMain DLL_PROCESS_DETACH 中调用。
+// ---------------------------------------------------------------------------
+void ShimVerLanguageName_Cleanup(void);
 
 // ---------------------------------------------------------------------------
 // VerLanguageNameA / VerLanguageNameW
