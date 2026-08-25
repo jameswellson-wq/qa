@@ -23,7 +23,7 @@
 //   1. VERSION_SRC.dll  — 重命名后的真实 version.dll
 //                          Vista+ 起函数的真实实现就在这里；
 //                          若已加载（应用首次调用其他 version 函数后），优先使用。
-//   2. KERNEL32.dll     — XP 兼容存根，Win7～Win11 均保留，最可靠的后备
+//   2. KERNEL32.dll     — XP 兼容存根，Win7~Win11 均保留，最可靠的后备
 //   3. KERNELBASE.dll   — Wine / 精简镜像中有时只有 KERNELBASE 实现
 //   4. 安全降级          — 写空串 + SetLastError(ERROR_PROC_NOT_FOUND) + 返回 0
 //                          调用方拿到 0 和错误码，行为明确，不会崩溃
@@ -42,7 +42,27 @@
 //   2. 删除 version.cpp 中的两条 KERNEL32 forwarder pragma（@14 / @15）
 //   3. 把 shim_verlanguagename.cpp 加入 vcxproj 源文件列表
 //
-
+// ─────────────────────────────────────────────────────────────────────────────
+// WIN32_LEAN_AND_MEAN（必须在 #include <windows.h> 之前生效）
+// ─────────────────────────────────────────────────────────────────────────────
+// 根本原因：若缺少此宏，<windows.h> 会拉入 <winver.h>，
+// <winver.h> 会把 VerLanguageNameA/W 声明为 __declspec(dllimport)，
+// 而 shim_verlanguagename.cpp 里这两个函数是 __declspec(dllexport) 定义，
+// 链接器遇到同一符号的两种 linkage → C2375: redefinition; different linkage。
+//
+// 防御策略（双重保险）：
+//   · 在本头文件的 #include <windows.h> 之前用 #ifndef 守护宏
+//   · 每个 .cpp（version.cpp / shim_verlanguagename.cpp）顶部也显式定义
+//   · vcxproj PreprocessorDefinitions 同样加入 WIN32_LEAN_AND_MEAN
+//     （保证任何 TU 都不会意外漏掉）
+//
+// 注意：#ifndef 守护只在 <windows.h> 尚未被当前 TU 包含时有效。
+// 若上游 TU 已经用无 LEAN_AND_MEAN 的方式 #include <windows.h>，
+// 则 <winver.h> 已在 TU 内存在。因此 .cpp 文件顶部的显式定义是关键。
+// ─────────────────────────────────────────────────────────────────────────────
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 
 #ifdef __cplusplus
@@ -53,6 +73,7 @@ extern "C" {
 // ShimVerLanguageName_Init
 //   主动触发探测；建议在 DllMain DLL_PROCESS_ATTACH 中调用。
 //   内部由 INIT_ONCE 保护，多次调用无副作用。
+//   在 Loader Lock 内调用安全（见 shim_verlanguagename.cpp 注释）。
 // ---------------------------------------------------------------------------
 void ShimVerLanguageName_Init(void);
 
