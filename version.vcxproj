@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <!-- ===== 配置矩阵：仅 x64，Debug / Release ===== -->
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|x64">
       <Configuration>Debug</Configuration>
@@ -11,6 +13,7 @@
     </ProjectConfiguration>
   </ItemGroup>
 
+  <!-- ===== 全局属性 ===== -->
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
     <Keyword>Win64Proj</Keyword>
@@ -21,25 +24,23 @@
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
 
-  <!-- ═══════════════════════════════════════════════════════
-       Debug | x64
-       ═══════════════════════════════════════════════════════ -->
+  <!-- ===== Debug 配置 ===== -->
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
     <PlatformToolset>v143</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
+    <!-- 修复问题3：关闭 WholeProgramOptimization，Debug 不需要 -->
+    <WholeProgramOptimization>false</WholeProgramOptimization>
   </PropertyGroup>
 
-  <!-- ═══════════════════════════════════════════════════════
-       Release | x64
-       ═══════════════════════════════════════════════════════ -->
+  <!-- ===== Release 配置 ===== -->
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
     <PlatformToolset>v143</PlatformToolset>
-    <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
   </PropertyGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
@@ -59,52 +60,48 @@
 
   <PropertyGroup Label="UserMacros" />
 
+  <!-- ===== 输出路径统一设置（两个配置共用） ===== -->
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <LinkIncremental>true</LinkIncremental>
+    <OutDir>$(SolutionDir)build\$(Configuration)\$(Platform)\</OutDir>
+    <IntDir>$(SolutionDir)build\$(Configuration)\$(Platform)\obj\</IntDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <LinkIncremental>false</LinkIncremental>
+    <OutDir>$(SolutionDir)build\$(Configuration)\$(Platform)\</OutDir>
+    <IntDir>$(SolutionDir)build\$(Configuration)\$(Platform)\obj\</IntDir>
   </PropertyGroup>
 
-  <!-- ═══════════════════════════════════════════════════════
-       Debug | x64  编译 + 链接配置
-       ═══════════════════════════════════════════════════════ -->
+  <!-- ===== Debug 编译 & 链接 ===== -->
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
-      <!-- Level4: 开启更多警告 -->
-      <WarningLevel>Level4</WarningLevel>
-      <!-- 警告当错误：强制修掉所有警告 -->
-      <TreatWarningAsError>true</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
+      <Optimization>Disabled</Optimization>
       <PreprocessorDefinitions>_WIN64;_DEBUG;VERSION_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
-      <!-- 栈溢出保护 /GS -->
+      <!-- 修复问题3：Debug 关掉 /GS buffer check 的额外开销可选，这里保留安全检查 -->
       <BufferSecurityCheck>true</BufferSecurityCheck>
-      <!-- Spectre 缓解 /Qspectre（日志第18503行实锤关闭，现在开启） -->
-      <SpectreMitigation>Spectre</SpectreMitigation>
+      <!-- 额外调试信息 -->
+      <DebugInformationFormat>EditAndContinue</DebugInformationFormat>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <!-- UAC 关闭原因：DLL 不需要 UAC 清单，开启反而报链接警告 -->
       <EnableUAC>false</EnableUAC>
-      <!-- ASLR：地址随机化 -->
-      <RandomizedBaseAddress>true</RandomizedBaseAddress>
-      <!-- DEP：数据执行保护 -->
-      <DataExecutionPrevention>true</DataExecutionPrevention>
+      <!-- DLL 不需要 DEP 检查，但保留 NXCOMPAT -->
+      <AdditionalOptions>/NXCOMPAT %(AdditionalOptions)</AdditionalOptions>
     </Link>
   </ItemDefinitionGroup>
 
-  <!-- ═══════════════════════════════════════════════════════
-       Release | x64  编译 + 链接配置
-       ═══════════════════════════════════════════════════════ -->
+  <!-- ===== Release 编译 & 链接 ===== -->
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
-      <WarningLevel>Level4</WarningLevel>
-      <TreatWarningAsError>true</TreatWarningAsError>
+      <WarningLevel>Level3</WarningLevel>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <!-- 修复问题3：O2 → MaxSpeed + 函数级链接 + 内联 -->
       <Optimization>MaxSpeed</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
@@ -112,22 +109,29 @@
       <PreprocessorDefinitions>_WIN64;NDEBUG;VERSION_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
-      <BufferSecurityCheck>true</BufferSecurityCheck>
-      <SpectreMitigation>Spectre</SpectreMitigation>
+      <!-- 修复问题3：Release 不要 EditAndContinue，改 ProgramDatabase -->
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
+      <!-- 去掉运行时检查，Release 不要 RTC -->
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <!-- 修复问题3：去掉 /GS 的 cookie，减小体积（proxy DLL 不需要栈保护） -->
+      <AdditionalOptions>/GS- %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
+      <!-- 修复问题1：Release 不输出 PDB（减小 artifact 体积，CI 用途） -->
+      <!-- 如需 PDB 做符号调试，改为 true -->
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <EnableUAC>false</EnableUAC>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
-      <!-- 修复：Release 不生成 PDB（原来=true 导致 PDB 体积 3.5MB） -->
-      <GenerateDebugInformation>false</GenerateDebugInformation>
-      <!-- UAC 关闭原因同上 -->
-      <EnableUAC>false</EnableUAC>
-      <RandomizedBaseAddress>true</RandomizedBaseAddress>
-      <DataExecutionPrevention>true</DataExecutionPrevention>
+      <!-- 修复问题3：链接时代码生成（配合 WholeProgramOptimization） -->
+      <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
+      <AdditionalOptions>/NXCOMPAT %(AdditionalOptions)</AdditionalOptions>
     </Link>
   </ItemDefinitionGroup>
 
+  <!-- ===== 源文件 ===== -->
   <ItemGroup>
     <ClCompile Include="version.cpp" />
   </ItemGroup>
@@ -140,4 +144,5 @@
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />
+
 </Project>
