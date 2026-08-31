@@ -56,9 +56,9 @@ BOOL APIENTRY DllMain( HMODULE hModule,
             g_hCurrentModule = hModule;
             DisableThreadLibraryCalls(hModule);
 
-            // SHIM 初始化保持同步：仅 GetModuleHandle + GetProcAddress，
-            // 在 Loader Lock 下完全合法（KERNEL32/KERNELBASE 此时必然已加载）。
-            ShimVerLanguageName_Init();
+            // 【修复 Defect 1】ShimVerLanguageName_Init() 已从此处移除。
+            // SHIM 改为纯懒初始化：首次调用 VerLanguageName* 时在导出函数内触发，
+            // 完全脱离 Loader Lock 上下文，从设计上消除 SafeLoadSystem 的死锁风险。
 
             // [FIX LOADER LOCK]
             // NsLoad() 可能执行 LoadLibrary / 网络请求 / 复杂线程同步。
