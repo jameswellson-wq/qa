@@ -1,179 +1,210 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// WIN32_LEAN_AND_MEAN — 必须是翻译单元的第一条有效语句
-// ─────────────────────────────────────────────────────────────────────────────
-// 即使 shim_verlanguagename.h 已条件定义此宏，在 .cpp 中重复保证不会有副作用。
-// 防御性写法：无论 include 顺序如何，都能保证 <windows.h> 以 lean 模式编译。
+// =============================================================================
+// shim_verlanguagename.cpp  ── v2 重构
 //
-// 根因说明：
-//   若缺少此宏，#include <windows.h> → #include <winver.h>（自动拉入）
-//   winver.h 声明 WINBASEAPI DWORD WINAPI VerLanguageNameA(...) （dllimport）
-//   本文件下方再定义同名函数（无 dllimport）→ C2375 redefinition; different linkage
+// 修复缺陷：
+//   Defect 1 ─ DllMain / Loader Lock 下的 SafeLoadSystem 死锁风险
+//   Defect 2 ─ INIT_ONCE 将"降级结果"永久固化，VERSION_SRC 加载后无法升级
+//   Defect 3 ─ SHIM_ENSURE_INIT 无质量感知，错过升级到最优路径的机会
 //
+// 新架构（两阶段初始化）：
+//   阶段 1 ─ BaseInit（INIT_ONCE 保护，首次导出调用时触发）
+//             仅探测 KERNEL32 / KERNELBASE，必然成功；
+//             不在 DllMain 中调用，彻底脱离 Loader Lock。
+//   阶段 2 ─ TryUpgradeToSrc（无锁原子，每次导出调用均执行，O(1) 开销）
+//             轻量探测 VERSION_SRC（仅 GetModuleHandle + GetProcAddress）；
+//             一旦找到，原子写入最优指针并设置标志，后续调用直走快速路径。
+// =============================================================================
 #define WIN32_LEAN_AND_MEAN
-
-//
-// shim_verlanguagename.cpp
-// VerLanguageNameA / W 运行时兼容 SHIM — 实现
-//
-// 替换 version.cpp 中已删除的两条静态 KERNEL32 转发：
-//   删除: #pragma comment(linker, "/EXPORT:VerLanguageNameA=KERNEL32.VerLanguageNameA,@14")
-//   删除: #pragma comment(linker, "/EXPORT:VerLanguageNameW=KERNEL32.VerLanguageNameW,@15")
-//
-// 导出机制重新设计：
-//   ✗ 旧方案: /EXPORT pragma + __declspec(dllexport) 双写 → 潜在 LNK4197
-//   ✓ 新方案: 由 version.def 统一声明 VerLanguageNameA @14 / VerLanguageNameW @15
-//             本文件仅提供函数实现，不再涉及导出属性
-//
 
 #include <windows.h>
 #include "shim_verlanguagename.h"
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 序号导出：已迁移至 version.def
-// ─────────────────────────────────────────────────────────────────────────────
-// 原来的两条 pragma：
-//   #pragma comment(linker, "/EXPORT:VerLanguageNameA,@14")   ← 已删除
-//   #pragma comment(linker, "/EXPORT:VerLanguageNameW,@15")   ← 已删除
-//
-// version.def 中对应条目：
-//   VerLanguageNameA  @14
-//   VerLanguageNameW  @15
-//
-// 删除原因：
-//   pragma + __declspec(dllexport) 同时存在是双重导出。
-//   链接器若检测到同一符号被两种机制导出且 ordinal 一致，
-//   会产生 LNK4197 警告。改用 .def 是 DLL proxy 项目的标准做法，
-//   ordinal 管理集中在一处，易于维护和审查。
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 函数指针类型
-// ─────────────────────────────────────────────────────────────────────────────
 typedef DWORD (WINAPI *pfnVerLanguageNameA_t)(DWORD wLang, LPSTR  szLang, DWORD nSize);
 typedef DWORD (WINAPI *pfnVerLanguageNameW_t)(DWORD wLang, LPWSTR szLang, DWORD nSize);
 
-// 解析后固定的目标函数指针（nullptr = 进入安全降级路径）
-static pfnVerLanguageNameA_t s_pfnA = nullptr;
-static pfnVerLanguageNameW_t s_pfnW = nullptr;
-
-// INIT_ONCE 控制：全进程只做一次探测
-static INIT_ONCE s_InitOnce = INIT_ONCE_STATIC_INIT;
+// ─────────────────────────────────────────────────────────────────────────────
+// 阶段 1：基础 fallback（KERNEL32 / KERNELBASE）
+// ─────────────────────────────────────────────────────────────────────────────
+// INIT_ONCE 保护，全进程执行一次。
+// DllMain 不再调用 Init，此回调仅在首次导出函数调用时触发，
+// 确保完全脱离 Loader Lock 上下文。
+static INIT_ONCE             s_BaseOnce  = INIT_ONCE_STATIC_INIT;
+static pfnVerLanguageNameA_t s_pfnA_base = nullptr;  // KERNEL32 / KERNELBASE fallback
+static pfnVerLanguageNameW_t s_pfnW_base = nullptr;
+static HMODULE               s_hOwned    = nullptr;  // LoadLibraryExW 时需 FreeLibrary
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 内部工具：安全加载系统 DLL
-//   · 先 GetModuleHandle（零开销：已加载就不重复 Load）
-//   · 再 LoadLibraryEx + LOAD_LIBRARY_SEARCH_SYSTEM32
-//     （只搜系统目录，防止 DLL 劫持攻击我们自己）
+// 阶段 2：最优路径（VERSION_SRC）
 // ─────────────────────────────────────────────────────────────────────────────
-static HMODULE SafeLoadSystem(const wchar_t* dllName)
+// 【修复 Defect 2 + 3】
+// 不再受 INIT_ONCE 约束。每次导出调用轻量检查一次 s_optimal；
+// 找到 VERSION_SRC 后原子升级，后续调用仅读一个原子变量（O(1)，无任何锁）。
+static volatile LONG         s_optimal   = 0;        // 0=fallback, 1=VERSION_SRC 就绪
+static pfnVerLanguageNameA_t s_pfnA_opt  = nullptr;  // VERSION_SRC 最优指针
+static pfnVerLanguageNameW_t s_pfnW_opt  = nullptr;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SafeLoadSystem（语义与旧版相同）
+// ─────────────────────────────────────────────────────────────────────────────
+static HMODULE SafeLoadSystem(const wchar_t* dllName, bool* pbOwned)
 {
-    HMODULE hMod = GetModuleHandleW(dllName);
-    if (!hMod)
-        hMod = LoadLibraryExW(dllName, NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    return hMod;
+    *pbOwned = false;
+    HMODULE h = GetModuleHandleW(dllName);
+    if (!h)
+    {
+        h = LoadLibraryExW(dllName, NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (h) *pbOwned = true;
+    }
+    return h;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// INIT_ONCE 回调：按优先级逐级探测，找到即停
+// BaseInitCallback ── 阶段 1 回调
 // ─────────────────────────────────────────────────────────────────────────────
-static BOOL WINAPI ShimInitCallback(
-    PINIT_ONCE  /*pInitOnce*/,
-    PVOID       /*pParam*/,
-    PVOID*      /*ppContext*/)
+// 只探测 KERNEL32 / KERNELBASE，不再处理 VERSION_SRC。
+// VERSION_SRC 交由 TryUpgradeToSrc() 在每次导出调用时处理。
+//
+// 【修复 Defect 1 原理】
+//   即使 SafeLoadSystem 的 LoadLibraryExW 分支在 Wine/精简系统上触发，
+//   此回调已脱离 DllMain（Loader Lock 已释放），不存在死锁风险。
+//   而在完整 Windows 上，KERNEL32 必然已加载，GetModuleHandle 直接命中，
+//   LoadLibraryExW 分支根本不会执行。
+// ─────────────────────────────────────────────────────────────────────────────
+static BOOL WINAPI BaseInitCallback(PINIT_ONCE, PVOID, PVOID*)
 {
-    // ── 探测配置表 ────────────────────────────────────────────────────────
-    //   mustAlreadyBeLoaded = true  → 只用 GetModuleHandle，不主动加载
-    //                                 (VERSION_SRC.dll 是代理 DLL 的依赖，
-    //                                  若已加载则用它，否则跳过，不强制 Load)
-    //   mustAlreadyBeLoaded = false → SafeLoadSystem（允许主动加载）
-    // ─────────────────────────────────────────────────────────────────────
-    struct Probe {
-        const wchar_t* name;
-        bool mustAlreadyBeLoaded;
-    };
+    const wchar_t* kCandidates[] = { L"KERNEL32.dll", L"KERNELBASE.dll" };
 
-    static const Probe kProbes[] = {
-        // 1. 真实 version.dll（Vista+ 起函数实现就在这里，最短路径）
-        //    仅在已加载时使用；DLL_PROCESS_ATTACH 阶段可能尚未加载，安全跳过
-        { L"VERSION_SRC.dll",  true  },
-        { L"VERSION_SRC",      true  },   // 部分环境省略 .dll 后缀
-
-        // 2. KERNEL32.dll — XP 兼容存根，所有真实 Windows 均已加载
-        { L"KERNEL32.dll",     false },
-
-        // 3. KERNELBASE.dll — Wine / 精简镜像 / 未来可能的实现位置
-        { L"KERNELBASE.dll",   false },
-    };
-
-    for (const auto& p : kProbes)
+    for (auto dll : kCandidates)
     {
-        HMODULE hMod = p.mustAlreadyBeLoaded
-            ? GetModuleHandleW(p.name)
-            : SafeLoadSystem(p.name);
+        bool bOwned = false;
+        HMODULE h = SafeLoadSystem(dll, &bOwned);
+        if (!h) continue;
 
-        if (!hMod)
-            continue;
+        auto pA = reinterpret_cast<pfnVerLanguageNameA_t>(
+            GetProcAddress(h, "VerLanguageNameA"));
+        auto pW = reinterpret_cast<pfnVerLanguageNameW_t>(
+            GetProcAddress(h, "VerLanguageNameW"));
 
-        auto pfnA = reinterpret_cast<pfnVerLanguageNameA_t>(
-            GetProcAddress(hMod, "VerLanguageNameA"));
-        auto pfnW = reinterpret_cast<pfnVerLanguageNameW_t>(
-            GetProcAddress(hMod, "VerLanguageNameW"));
-
-        if (pfnA && pfnW)
+        if (pA && pW)
         {
-            // 两个都找到才算成功，避免出现 A 有 W 无的半残状态
-            s_pfnA = pfnA;
-            s_pfnW = pfnW;
+            s_pfnA_base = pA;
+            s_pfnW_base = pW;
+            if (bOwned) s_hOwned = h;
             return TRUE;
         }
+        if (bOwned) FreeLibrary(h);
     }
-
-    // 4. 完全找不到 → s_pfnA / s_pfnW 保持 nullptr → 安全降级路径
-    //    注意：必须返回 TRUE；返回 FALSE 会导致 INIT_ONCE 进入失败状态，
-    //    后续 InitOnceExecuteOnce 会反复重试，造成性能问题。
+    // 两个候选都失败 → 安全降级路径
+    // 必须返回 TRUE；返回 FALSE 使 INIT_ONCE 进入失败重试模式（性能问题）
     return TRUE;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 公开 API：主动初始化（version.cpp DllMain 中调用）
+// TryUpgradeToSrc ── 阶段 2 无锁升级探测
 // ─────────────────────────────────────────────────────────────────────────────
-void ShimVerLanguageName_Init(void)
+// 【修复 Defect 2 + 3 原理】
+//   旧 INIT_ONCE 方案问题：
+//     t=0  DllMain → ShimInit → VERSION_SRC 未加载 → 固化为 KERNEL32 fallback
+//     t=1  VERSION_SRC 加载完毕（PE Forwarder 机制）
+//     t=2  应用调用 VerLanguageNameA → INIT_ONCE 已完成 → 永远用 KERNEL32 ← ⚠
+//
+//   新方案：
+//     s_optimal 初始为 0；每次导出调用读 s_optimal：
+//       · 为 1 → InterlockedCompareExchange 快速退出，直接使用 s_pfnA/W_opt
+//       · 为 0 → GetModuleHandle("VERSION_SRC.dll")（纯用户态，无 Loader Lock 风险）
+//               找到 → 原子写入指针 → InterlockedExchange(&s_optimal, 1)
+//               未找到 → 返回，继续用 fallback，下次调用再试
+//
+// 内存序保证（x86/x64）：
+//   InterlockedExchangePointer 使用 LOCK XCHG（完整内存屏障）。
+//   先写两个函数指针（各带屏障），再写 s_optimal=1（带屏障）。
+//   读方若看到 s_optimal=1，一定能看到已写入的 s_pfnA/W_opt。
+// ─────────────────────────────────────────────────────────────────────────────
+static void TryUpgradeToSrc()
 {
-    PVOID pCtx = nullptr;
-    InitOnceExecuteOnce(&s_InitOnce, ShimInitCallback, nullptr, &pCtx);
+    // 快速路径：已升级，原子读后直接返回
+    if (InterlockedCompareExchange(&s_optimal, 0, 0) == 1) return;
+
+    // GetModuleHandle 只查已加载模块，不触发加载，完全 Loader Lock 安全
+    HMODULE h = GetModuleHandleW(L"VERSION_SRC.dll");
+    if (!h) h = GetModuleHandleW(L"VERSION_SRC");  // 部分环境省略 .dll 后缀
+    if (!h) return;                                 // 尚未加载，本次跳过，下次再探
+
+    auto pA = reinterpret_cast<pfnVerLanguageNameA_t>(
+        GetProcAddress(h, "VerLanguageNameA"));
+    auto pW = reinterpret_cast<pfnVerLanguageNameW_t>(
+        GetProcAddress(h, "VerLanguageNameW"));
+    if (!pA || !pW) return;  // 模块存在但函数缺失（不完整 VERSION_SRC），跳过
+
+    // 发布顺序：先写函数指针（带屏障），再置标志（带屏障）
+    // 多线程并发时可能多次写入，但写入值相同，幂等安全
+    InterlockedExchangePointer(
+        reinterpret_cast<PVOID*>(&s_pfnA_opt), reinterpret_cast<PVOID>(pA));
+    InterlockedExchangePointer(
+        reinterpret_cast<PVOID*>(&s_pfnW_opt), reinterpret_cast<PVOID>(pW));
+    InterlockedExchange(&s_optimal, 1);  // 发布屏障：读方看到 1 即可安全使用 opt 指针
 }
 
-// 内部懒初始化宏：在导出函数入口处保证 INIT_ONCE 已执行
-#define SHIM_ENSURE_INIT() \
-    do { \
-        PVOID _ctx = nullptr; \
-        InitOnceExecuteOnce(&s_InitOnce, ShimInitCallback, nullptr, &_ctx); \
+// ─────────────────────────────────────────────────────────────────────────────
+// SHIM_ENSURE_INIT ── 两阶段初始化入口（更新后）
+// ─────────────────────────────────────────────────────────────────────────────
+// 稳态性能：
+//   · InitOnceExecuteOnce → 已完成时内部仅读一个标志，O(1)
+//   · TryUpgradeToSrc     → s_optimal=1 后仅一次 InterlockedCompareExchange，O(1)
+//   两者在 VERSION_SRC 找到后共同构成接近零开销的热路径
+// ─────────────────────────────────────────────────────────────────────────────
+#define SHIM_ENSURE_INIT()                                                      \
+    do {                                                                        \
+        PVOID _ctx = nullptr;                                                   \
+        InitOnceExecuteOnce(&s_BaseOnce, BaseInitCallback, nullptr, &_ctx);     \
+        TryUpgradeToSrc();                                                      \
     } while (0)
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 导出函数实现
+// 公开 API
 // ─────────────────────────────────────────────────────────────────────────────
-// 注意：此处不再使用 __declspec(dllexport)。
-//       导出由 version.def 控制（VerLanguageNameA @14 / VerLanguageNameW @15）。
-//       extern "C" 保留：确保链接器符号名为 C 风格（无 C++ 名称修饰），
-//       与 .def 文件中的导出名称 "VerLanguageNameA" / "VerLanguageNameW" 精确匹配。
+
+// 【行为变更】
+//   旧：DllMain DLL_PROCESS_ATTACH 中同步调用（Loader Lock 持有期间）
+//   新：DllMain 中不再调用。接口保留供以下场景：
+//       · 显式要求在首次导出调用之前完成基础探测（非 DllMain 上下文）
+//       · 单元测试主动触发初始化
+//   INIT_ONCE 保护，多次调用无副作用。
+void ShimVerLanguageName_Init(void)
+{
+    PVOID _ctx = nullptr;
+    InitOnceExecuteOnce(&s_BaseOnce, BaseInitCallback, nullptr, &_ctx);
+    TryUpgradeToSrc();
+}
+
+// 释放 LoadLibraryExW 引入的额外引用计数（Load/Free 配对）
+// InterlockedExchangePointer 保证多次调用幂等
+void ShimVerLanguageName_Cleanup(void)
+{
+    HMODULE h = static_cast<HMODULE>(
+        InterlockedExchangePointer(
+            reinterpret_cast<PVOID*>(&s_hOwned), nullptr));
+    if (h) FreeLibrary(h);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 导出函数实现（序号由 version.def 统一管理：@14 / @15）
+// ─────────────────────────────────────────────────────────────────────────────
+// 调用优先级：
+//   1. VERSION_SRC（最优，直接调用真实实现）
+//   2. KERNEL32 / KERNELBASE（fallback，可靠兼容）
+//   3. 安全降级（全部失败时，写空串 + 错误码 + 返回 0）
+// ─────────────────────────────────────────────────────────────────────────────
 
 extern "C"
 DWORD WINAPI VerLanguageNameA(DWORD wLang, LPSTR szLang, DWORD nSize)
 {
-    // 懒初始化：若 DllMain 中未提前调用 ShimVerLanguageName_Init()，
-    // 此处仍可正确初始化（INIT_ONCE 保证幂等 + 线程安全）
     SHIM_ENSURE_INIT();
 
-    if (s_pfnA)
-        return s_pfnA(wLang, szLang, nSize);
+    if (s_pfnA_opt)  return s_pfnA_opt (wLang, szLang, nSize);  // 最优路径
+    if (s_pfnA_base) return s_pfnA_base(wLang, szLang, nSize);  // fallback
 
-    // ── 安全降级 ─────────────────────────────────────────────────────────
-    // 所有探测路径均失败（Wine 极精简环境 / 未知未来系统）
-    // 写空串：调用方不会读到垃圾内存
-    // SetLastError：调用方可检测到失败
-    // 返回 0：符合 MSDN 文档对失败情况的约定
-    if (szLang && nSize > 0)
-        szLang[0] = '\0';
+    if (szLang && nSize > 0) szLang[0] = '\0';
     SetLastError(ERROR_PROC_NOT_FOUND);
     return 0;
 }
@@ -183,12 +214,10 @@ DWORD WINAPI VerLanguageNameW(DWORD wLang, LPWSTR szLang, DWORD nSize)
 {
     SHIM_ENSURE_INIT();
 
-    if (s_pfnW)
-        return s_pfnW(wLang, szLang, nSize);
+    if (s_pfnW_opt)  return s_pfnW_opt (wLang, szLang, nSize);
+    if (s_pfnW_base) return s_pfnW_base(wLang, szLang, nSize);
 
-    // 安全降级（宽字符版）
-    if (szLang && nSize > 0)
-        szLang[0] = L'\0';
+    if (szLang && nSize > 0) szLang[0] = L'\0';
     SetLastError(ERROR_PROC_NOT_FOUND);
     return 0;
 }
